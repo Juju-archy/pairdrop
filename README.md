@@ -1,17 +1,16 @@
 <div align="center">
-  <a href="https://github.com/schlagmichdoch/PairDrop">
+  <a href="https://github.com/Juju-archy/pairdrop">
     <img src="public/images/android-chrome-512x512.png" alt="Logo"  width="150" height="150">
   </a>
  
-  # _Send it_, with [PairDrop](https://pairdrop.net)
+  # _Send it_, with [PairDrop](https://pairdrop.meetfur.com)
 
   <p>
-    Local file sharing <a href="https://pairdrop.net"><strong>in your web browser</strong></a>. 
+    Local file sharing <a href="https://pairdrop.meetfur.com"><strong>in your web browser</strong></a>. 
     <br />
     <br />
-    <a href="https://github.com/schlagmichdoch/PairDrop/issues">Report a bug</a>
-    <br />
-    <a href="https://github.com/schlagmichdoch/PairDrop/issues">Request feature</a>
+    <a href="https://github.com/Juju-archy/pairdrop/issues">Report a bug or a feature</a>
+
   </p>
 </div>
 
@@ -112,11 +111,6 @@ Connect to others in complex network situations, or over the Internet.
 [Host your own instance with Docker or Node.js](docs/host-your-own.md).
 
 ## Support
-<a href="https://www.buymeacoffee.com/pairdrop" target="_blank">
-<img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" alt="Buy me a coffee" style="height: 60px !important;width: 217px !important;" >
-</a>
-<br />
-<br />
 
 PairDrop is libre, and always will be. \
 If you find it useful and want to support free and open-source software, please consider donating using the button above. \
@@ -124,6 +118,6 @@ I footed the bill for the domain and the server, and you can help create and mai
 Thank you very much for your contribution!
 
 ## Contributing
-Feel free to [open an issue](https://github.com/schlagmichdoch/pairdrop/issues/new/choose) or a
-[pull request](https://github.com/schlagmichdoch/pairdrop/pulls), following the
+Feel free to [open an issue](https://github.com/Juju-archy/pairdrop/issues/new/choose) or a
+[pull request](https://github.com/Juju-archy/pairdrop/pulls), following the
 [Contributing Guidelines](CONTRIBUTING.md).
