@@ -1,2 +1,2 @@
-# paridrop
+# pairdrop
 Pairdrop custom
