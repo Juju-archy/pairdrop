@@ -1,29 +1,81 @@
-window.URL = window.URL || window.webkitURL;
-window.isRtcSupported = !!(window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection);
-
-if (!window.isRtcSupported) alert("WebRTC must be enabled for PairDrop to work");
-
 class ServerConnection {
 
     constructor() {
-        this._connect();
         Events.on('pagehide', _ => this._disconnect());
-        document.addEventListener('visibilitychange', _ => this._onVisibilityChange());
-        if (navigator.connection) navigator.connection.addEventListener('change', _ => this._reconnect());
-        Events.on('room-secrets', e => this._sendRoomSecrets(e.detail));
-        Events.on('room-secret-deleted', e => this.send({ type: 'room-secret-deleted', roomSecret: e.detail}));
-        Events.on('room-secrets-cleared', e => this.send({ type: 'room-secrets-cleared', roomSecrets: e.detail}));
-        Events.on('resend-peers', _ => this.send({ type: 'resend-peers'}));
+        Events.on(window.visibilityChangeEvent, _ => this._onVisibilityChange());
+
+        if (navigator.connection) {
+            navigator.connection.addEventListener('change', _ => this._reconnect());
+        }
+
+        Events.on('room-secrets', e => this.send({ type: 'room-secrets', roomSecrets: e.detail }));
+        Events.on('join-ip-room', _ => this.send({ type: 'join-ip-room'}));
+        Events.on('room-secrets-deleted', e => this.send({ type: 'room-secrets-deleted', roomSecrets: e.detail}));
+        Events.on('regenerate-room-secret', e => this.send({ type: 'regenerate-room-secret', roomSecret: e.detail}));
         Events.on('pair-device-initiate', _ => this._onPairDeviceInitiate());
         Events.on('pair-device-join', e => this._onPairDeviceJoin(e.detail));
         Events.on('pair-device-cancel', _ => this.send({ type: 'pair-device-cancel' }));
+
+        Events.on('create-public-room', _ => this._onCreatePublicRoom());
+        Events.on('join-public-room', e => this._onJoinPublicRoom(e.detail.roomId, e.detail.createIfInvalid));
+        Events.on('leave-public-room', _ => this._onLeavePublicRoom());
+
         Events.on('offline', _ => clearTimeout(this._reconnectTimer));
         Events.on('online', _ => this._connect());
+
+        this._getConfig().then(() => this._connect());
+    }
+
+    _getConfig() {
+        console.log("Loading config...")
+        return new Promise((resolve, reject) => {
+            let xhr = new XMLHttpRequest();
+            xhr.addEventListener("load", () => {
+                if (xhr.status === 200) {
+                    // Config received
+                    let config = JSON.parse(xhr.responseText);
+                    console.log("Config loaded:", config)
+                    this._config = config;
+                    Events.fire('config', config);
+                    resolve()
+                } else if (xhr.status < 200 || xhr.status >= 300) {
+                    retry(xhr);
+                }
+            })
+
+            xhr.addEventListener("error", _ => {
+                retry(xhr);
+            });
+
+            function retry(request) {
+                setTimeout(function () {
+                    openAndSend(request)
+                }, 1000)
+            }
+
+            function openAndSend() {
+                xhr.open('GET', 'config');
+                xhr.send();
+            }
+
+            openAndSend(xhr);
+        })
+    }
+
+    _setWsConfig(wsConfig) {
+        this._wsConfig = wsConfig;
+        Events.fire('ws-config', wsConfig);
     }
 
     _connect() {
         clearTimeout(this._reconnectTimer);
-        if (this._isConnected() || this._isConnecting()) return;
+        if (this._isConnected() || this._isConnecting() || this._isOffline()) return;
+        if (this._isReconnect) {
+            Events.fire('notify-user', {
+                message: Localization.getTranslation("notifications.connecting"),
+                persistent: true
+            });
+        }
         const ws = new WebSocket(this._endpoint());
         ws.binaryType = 'arraybuffer';
         ws.onopen = _ => this._onOpen();
@@ -36,42 +88,58 @@ class ServerConnection {
     _onOpen() {
         console.log('WS: server connected');
         Events.fire('ws-connected');
-        if (this._isReconnect) Events.fire('notify-user', 'Connected.');
-    }
-
-    _sendRoomSecrets(roomSecrets) {
-        this.send({ type: 'room-secrets', roomSecrets: roomSecrets });
+        if (this._isReconnect) Events.fire('notify-user', Localization.getTranslation("notifications.connected"));
     }
 
     _onPairDeviceInitiate() {
         if (!this._isConnected()) {
-            Events.fire('notify-user', 'You need to be online to pair devices.');
+            Events.fire('notify-user', Localization.getTranslation("notifications.online-requirement-pairing"));
             return;
         }
-        this.send({ type: 'pair-device-initiate' })
+        this.send({ type: 'pair-device-initiate' });
     }
 
-    _onPairDeviceJoin(roomKey) {
+    _onPairDeviceJoin(pairKey) {
         if (!this._isConnected()) {
-            setTimeout(_ => this._onPairDeviceJoin(roomKey), 1000);
+            setTimeout(() => this._onPairDeviceJoin(pairKey), 1000);
             return;
         }
-        this.send({ type: 'pair-device-join', roomKey: roomKey })
+        this.send({ type: 'pair-device-join', pairKey: pairKey });
     }
 
-    _setRtcConfig(config) {
-        window.rtcConfig = config;
+    _onCreatePublicRoom() {
+        if (!this._isConnected()) {
+            Events.fire('notify-user', Localization.getTranslation("notifications.online-requirement-public-room"));
+            return;
+        }
+        this.send({ type: 'create-public-room' });
+    }
+
+    _onJoinPublicRoom(roomId, createIfInvalid) {
+        if (!this._isConnected()) {
+            setTimeout(() => this._onJoinPublicRoom(roomId), 1000);
+            return;
+        }
+        this.send({ type: 'join-public-room', publicRoomId: roomId, createIfInvalid: createIfInvalid });
+    }
+
+    _onLeavePublicRoom() {
+        if (!this._isConnected()) {
+            setTimeout(() => this._onLeavePublicRoom(), 1000);
+            return;
+        }
+        this.send({ type: 'leave-public-room' });
     }
 
     _onMessage(msg) {
         msg = JSON.parse(msg);
-        if (msg.type !== 'ping') console.log('WS:', msg);
+        if (msg.type !== 'ping') console.log('WS receive:', msg);
         switch (msg.type) {
-            case 'rtc-config':
-                this._setRtcConfig(msg.config);
+            case 'ws-config':
+                this._setWsConfig(msg.wsConfig);
                 break;
             case 'peers':
-                Events.fire('peers', msg);
+                this._onPeers(msg);
                 break;
             case 'peer-joined':
                 Events.fire('peer-joined', msg);
@@ -98,66 +166,134 @@ class ServerConnection {
                 Events.fire('pair-device-join-key-invalid');
                 break;
             case 'pair-device-canceled':
-                Events.fire('pair-device-canceled', msg.roomKey);
+                Events.fire('pair-device-canceled', msg.pairKey);
                 break;
-            case 'pair-device-join-key-rate-limit':
-                Events.fire('notify-user', 'Rate limit reached. Wait 10 seconds and try again.');
+            case 'join-key-rate-limit':
+                Events.fire('notify-user', Localization.getTranslation("notifications.rate-limit-join-key"));
                 break;
             case 'secret-room-deleted':
                 Events.fire('secret-room-deleted', msg.roomSecret);
                 break;
+            case 'room-secret-regenerated':
+                Events.fire('room-secret-regenerated', msg);
+                break;
+            case 'public-room-id-invalid':
+                Events.fire('public-room-id-invalid', msg.publicRoomId);
+                break;
+            case 'public-room-created':
+                Events.fire('public-room-created', msg.roomId);
+                break;
+            case 'public-room-left':
+                Events.fire('public-room-left');
+                break;
+            case 'request':
+            case 'header':
+            case 'partition':
+            case 'partition-received':
+            case 'progress':
+            case 'files-transfer-response':
+            case 'file-transfer-complete':
+            case 'message-transfer-complete':
+            case 'text':
+            case 'display-name-changed':
+            case 'ws-chunk':
+                // ws-fallback
+                if (this._wsConfig.wsFallback) {
+                    Events.fire('ws-relay', JSON.stringify(msg));
+                }
+                else {
+                    console.log("WS receive: message type is for websocket fallback only but websocket fallback is not activated on this instance.")
+                }
+                break;
             default:
-                console.error('WS: unknown message type', msg);
+                console.error('WS receive: unknown message type', msg);
         }
     }
 
     send(msg) {
         if (!this._isConnected()) return;
+        if (msg.type !== 'pong') console.log("WS send:", msg)
         this._socket.send(JSON.stringify(msg));
     }
 
+    _onPeers(msg) {
+        Events.fire('peers', msg);
+    }
+
     _onDisplayName(msg) {
-        sessionStorage.setItem("peerId", msg.message.peerId);
-        sessionStorage.setItem("peerIdHash", msg.message.peerIdHash);
+        // Add peerId and peerIdHash to sessionStorage to authenticate as the same device on page reload
+        sessionStorage.setItem('peer_id', msg.peerId);
+        sessionStorage.setItem('peer_id_hash', msg.peerIdHash);
+
+        // Add peerId to localStorage to mark it for other PairDrop tabs on the same browser
+        BrowserTabsConnector
+            .addPeerIdToLocalStorage()
+            .then(peerId => {
+                if (!peerId) return;
+                console.log("successfully added peerId to localStorage");
+
+                // Only now join rooms
+                Events.fire('join-ip-room');
+                PersistentStorage.getAllRoomSecrets()
+                    .then(roomSecrets => {
+                        Events.fire('room-secrets', roomSecrets);
+                    });
+            });
+
         Events.fire('display-name', msg);
     }
 
     _endpoint() {
-        // hack to detect if deployment or development environment
         const protocol = location.protocol.startsWith('https') ? 'wss' : 'ws';
-        const webrtc = window.isRtcSupported ? '/webrtc' : '/fallback';
-        let ws_url = new URL(protocol + '://' + location.host + location.pathname + 'server' + webrtc);
-        const peerId = sessionStorage.getItem("peerId");
-        const peerIdHash = sessionStorage.getItem("peerIdHash");
+        // Check whether the instance specifies another signaling server otherwise use the current instance for signaling
+        let wsServerDomain = this._config.signalingServer
+            ? this._config.signalingServer
+            : location.host + location.pathname;
+
+        let wsUrl = new URL(protocol + '://' + wsServerDomain + 'server');
+
+        wsUrl.searchParams.append('webrtc_supported', window.isRtcSupported ? 'true' : 'false');
+
+        const peerId = sessionStorage.getItem('peer_id');
+        const peerIdHash = sessionStorage.getItem('peer_id_hash');
         if (peerId && peerIdHash) {
-            ws_url.searchParams.append('peer_id', peerId);
-            ws_url.searchParams.append('peer_id_hash', peerIdHash);
+            wsUrl.searchParams.append('peer_id', peerId);
+            wsUrl.searchParams.append('peer_id_hash', peerIdHash);
         }
-        return ws_url.toString();
+
+        return wsUrl.toString();
     }
 
     _disconnect() {
         this.send({ type: 'disconnect' });
-        if (this._socket) {
-            this._socket.onclose = null;
-            this._socket.close();
-            this._socket = null;
-            Events.fire('ws-disconnected');
-            this._isReconnect = true;
-        }
-    }
 
-    _onDisconnect() {
-        console.log('WS: server disconnected');
-        Events.fire('notify-user', 'Connecting..');
-        clearTimeout(this._reconnectTimer);
-        this._reconnectTimer = setTimeout(_ => this._connect(), 1000);
+        const peerId = sessionStorage.getItem('peer_id');
+        BrowserTabsConnector
+            .removePeerIdFromLocalStorage(peerId)
+            .then(_ => {
+                console.log("successfully removed peerId from localStorage");
+            });
+
+        if (!this._socket) return;
+
+        this._socket.onclose = null;
+        this._socket.close();
+        this._socket = null;
         Events.fire('ws-disconnected');
         this._isReconnect = true;
     }
 
+    _onDisconnect() {
+        console.log('WS: server disconnected');
+        setTimeout(() => {
+            this._isReconnect = true;
+            Events.fire('ws-disconnected');
+            this._reconnectTimer = setTimeout(() => this._connect(), 1000);
+        }, 100); //delay for 100ms to prevent flickering on page reload
+    }
+
     _onVisibilityChange() {
-        if (document.hidden) return;
+        if (window.hiddenProperty) return;
         this._connect();
     }
 
@@ -167,6 +303,10 @@ class ServerConnection {
 
     _isConnecting() {
         return this._socket && this._socket.readyState === this._socket.CONNECTING;
+    }
+
+    _isOffline() {
+        return !navigator.onLine;
     }
 
     _onError(e) {
@@ -181,65 +321,116 @@ class ServerConnection {
 
 class Peer {
 
-    constructor(serverConnection, peerId, roomType, roomSecret) {
+    constructor(serverConnection, isCaller, peerId, roomType, roomId) {
         this._server = serverConnection;
+        this._isCaller = isCaller;
         this._peerId = peerId;
-        this._roomType = roomType;
-        this._roomSecret = roomSecret;
+
+        this._roomIds = {};
+        this._updateRoomIds(roomType, roomId);
+
         this._filesQueue = [];
         this._busy = false;
+
+        // evaluate auto accept
+        this._evaluateAutoAccept();
     }
 
     sendJSON(message) {
         this._send(JSON.stringify(message));
     }
 
+    // Is overwritten in expanding classes
+    _send(message) {}
+
     sendDisplayName(displayName) {
         this.sendJSON({type: 'display-name-changed', displayName: displayName});
     }
 
-    async createHeader(file) {
-        return {
-            name: file.name,
-            mime: file.type,
-            size: file.size,
-        };
+    _isSameBrowser() {
+        return BrowserTabsConnector.peerIsSameBrowser(this._peerId);
     }
 
-    getResizedImageDataUrl(file, width = undefined, height = undefined, quality = 0.7) {
-        return new Promise((resolve, reject) => {
-            let image = new Image();
-            image.src = URL.createObjectURL(file);
-            image.onload = _ => {
-                let imageWidth = image.width;
-                let imageHeight = image.height;
-                let canvas = document.createElement('canvas');
+    _isPaired() {
+        return !!this._roomIds['secret'];
+    }
 
-                // resize the canvas and draw the image data into it
-                if (width && height) {
-                    canvas.width = width;
-                    canvas.height = height;
-                } else if (width) {
-                    canvas.width = width;
-                    canvas.height = Math.floor(imageHeight * width / imageWidth)
-                } else if (height) {
-                    canvas.width = Math.floor(imageWidth * height / imageHeight);
-                    canvas.height = height;
-                } else {
-                    canvas.width = imageWidth;
-                    canvas.height = imageHeight
-                }
+    _getPairSecret() {
+        return this._roomIds['secret'];
+    }
 
-                var ctx = canvas.getContext("2d");
-                ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    _regenerationOfPairSecretNeeded() {
+        return this._getPairSecret() && this._getPairSecret().length !== 256
+    }
 
-                let dataUrl = canvas.toDataURL("image/jpeg", quality);
-                resolve(dataUrl);
-            }
-            image.onerror = _ => reject(`Could not create an image thumbnail from type ${file.type}`);
-        }).then(dataUrl => {
-            return dataUrl;
-        }).catch(e => console.error(e));
+    _getRoomTypes() {
+        return Object.keys(this._roomIds);
+    }
+
+    _updateRoomIds(roomType, roomId) {
+        const roomTypeIsSecret = roomType === "secret";
+        const roomIdIsNotPairSecret = this._getPairSecret() !== roomId;
+
+        // if peer is another browser tab, peer is not identifiable with roomSecret as browser tabs share all roomSecrets
+        // -> do not delete duplicates and do not regenerate room secrets
+        if (!this._isSameBrowser()
+            && roomTypeIsSecret
+            && this._isPaired()
+            && roomIdIsNotPairSecret) {
+            // multiple roomSecrets with same peer -> delete old roomSecret
+            PersistentStorage
+                .deleteRoomSecret(this._getPairSecret())
+                .then(deletedRoomSecret => {
+                    if (deletedRoomSecret) console.log("Successfully deleted duplicate room secret with same peer: ", deletedRoomSecret);
+                });
+        }
+
+        this._roomIds[roomType] = roomId;
+
+        if (!this._isSameBrowser()
+            &&  roomTypeIsSecret
+            &&  this._isPaired()
+            &&  this._regenerationOfPairSecretNeeded()
+            &&  this._isCaller) {
+            // increase security by initiating the increase of the roomSecret length
+            // from 64 chars (<v1.7.0) to 256 chars (v1.7.0+)
+            console.log('RoomSecret is regenerated to increase security')
+            Events.fire('regenerate-room-secret', this._getPairSecret());
+        }
+    }
+
+    _removeRoomType(roomType) {
+        delete this._roomIds[roomType];
+
+        Events.fire('room-type-removed', {
+            peerId: this._peerId,
+            roomType: roomType
+        });
+    }
+
+    _evaluateAutoAccept() {
+        if (!this._isPaired()) {
+            this._setAutoAccept(false);
+            return;
+        }
+
+        PersistentStorage
+            .getRoomSecretEntry(this._getPairSecret())
+            .then(roomSecretEntry => {
+                const autoAccept = roomSecretEntry
+                    ? roomSecretEntry.entry.auto_accept
+                    : false;
+                this._setAutoAccept(autoAccept);
+            })
+            .catch(_ => {
+                this._setAutoAccept(false);
+            });
+    }
+
+    _setAutoAccept(autoAccept) {
+        this._autoAccept = !this._isSameBrowser()
+            ? autoAccept
+            : false;
     }
 
     async requestFileTransfer(files) {
@@ -248,7 +439,11 @@ class Peer {
         let imagesOnly = true
         for (let i=0; i<files.length; i++) {
             Events.fire('set-progress', {peerId: this._peerId, progress: 0.8*i/files.length, status: 'prepare'})
-            header.push(await this.createHeader(files[i]));
+            header.push({
+                name: files[i].name,
+                mime: files[i].type,
+                size: files[i].size
+            });
             totalSize += files[i].size;
             if (files[i].type.split('/')[0] !== 'image') imagesOnly = false;
         }
@@ -257,7 +452,11 @@ class Peer {
 
         let dataUrl = '';
         if (files[0].type.split('/')[0] === 'image') {
-            dataUrl = await this.getResizedImageDataUrl(files[0], 400, null, 0.9);
+            try {
+                dataUrl = await getThumbnailAsDataUrl(files[0], 400, null, 0.9);
+            } catch (e) {
+                console.error(e);
+            }
         }
 
         Events.fire('set-progress', {peerId: this._peerId, progress: 1, status: 'prepare'})
@@ -360,7 +559,7 @@ class Peer {
 
     _onFilesTransferRequest(request) {
         if (this._requestPending) {
-            // Only accept one request at a time
+            // Only accept one request at a time per peer
             this.sendJSON({type: 'files-transfer-response', accepted: false});
             return;
         }
@@ -372,6 +571,14 @@ class Peer {
         }
 
         this._requestPending = request;
+
+        if (this._autoAccept) {
+            // auto accept if set via Edit Paired Devices Dialog
+            this._respondToFileTransferRequest(true);
+            return;
+        }
+
+        // default behavior: show user transfer request
         Events.fire('files-transfer-request', {
             request: request,
             peerId: this._peerId
@@ -402,7 +609,7 @@ class Peer {
 
     _abortTransfer() {
         Events.fire('set-progress', {peerId: this._peerId, progress: 1, status: 'wait'});
-        Events.fire('notify-user', 'Files are incorrect.');
+        Events.fire('notify-user', Localization.getTranslation("notifications.files-incorrect"));
         this._filesReceived = [];
         this._requestAccepted = null;
         this._digester = null;
@@ -443,14 +650,14 @@ class Peer {
             this._abortTransfer();
         }
 
-        // include for compatibility with Snapdrop for Android app
+        // include for compatibility with 'Snapdrop & PairDrop for Android' app
         Events.fire('file-received', fileBlob);
 
         this._filesReceived.push(fileBlob);
         if (!this._requestAccepted.header.length) {
             this._busy = false;
             Events.fire('set-progress', {peerId: this._peerId, progress: 0, status: 'process'});
-            Events.fire('files-received', {sender: this._peerId, files: this._filesReceived, imagesOnly: this._requestAccepted.imagesOnly, totalSize: this._requestAccepted.totalSize});
+            Events.fire('files-received', {peerId: this._peerId, files: this._filesReceived, imagesOnly: this._requestAccepted.imagesOnly, totalSize: this._requestAccepted.totalSize});
             this._filesReceived = [];
             this._requestAccepted = null;
         }
@@ -460,8 +667,10 @@ class Peer {
         this._chunker = null;
         if (!this._filesQueue.length) {
             this._busy = false;
-            Events.fire('notify-user', 'File transfer completed.');
-        } else {
+            Events.fire('notify-user', Localization.getTranslation("notifications.file-transfer-completed"));
+            Events.fire('files-sent'); // used by 'Snapdrop & PairDrop for Android' app
+        }
+        else {
             this._dequeueFile();
         }
     }
@@ -471,7 +680,7 @@ class Peer {
             Events.fire('set-progress', {peerId: this._peerId, progress: 1, status: 'wait'});
             this._filesRequested = null;
             if (message.reason === 'ios-memory-limit') {
-                Events.fire('notify-user', "Sending files to iOS is only possible up to 200MB at once");
+                Events.fire('notify-user', Localization.getTranslation("notifications.ios-memory-limit"));
             }
             return;
         }
@@ -481,7 +690,7 @@ class Peer {
     }
 
     _onMessageTransferCompleted() {
-        Events.fire('notify-user', 'Message transfer completed.');
+        Events.fire('notify-user', Localization.getTranslation("notifications.message-transfer-completed"));
     }
 
     sendText(text) {
@@ -497,35 +706,44 @@ class Peer {
     }
 
     _onDisplayNameChanged(message) {
-        if (!message.displayName || this._displayName === message.displayName) return;
-        this._displayName = message.displayName;
+        const displayNameHasChanged = this._displayName !== message.displayName
+
+        if (message.displayName && displayNameHasChanged) {
+            this._displayName = message.displayName;
+        }
+
         Events.fire('peer-display-name-changed', {peerId: this._peerId, displayName: message.displayName});
+
+        if (!displayNameHasChanged) return;
+        Events.fire('notify-peer-display-name-changed', this._peerId);
     }
 }
 
 class RTCPeer extends Peer {
 
-    constructor(serverConnection, peerId, roomType, roomSecret) {
-        super(serverConnection, peerId, roomType, roomSecret);
+    constructor(serverConnection, isCaller, peerId, roomType, roomId, rtcConfig) {
+        super(serverConnection, isCaller, peerId, roomType, roomId);
+
         this.rtcSupported = true;
-        if (!peerId) return; // we will listen for a caller
-        this._connect(peerId, true);
+        this.rtcConfig = rtcConfig
+
+        if (!this._isCaller) return; // we will listen for a caller
+        this._connect();
     }
 
-    _connect(peerId, isCaller) {
-        if (!this._conn || this._conn.signalingState === "closed") this._openConnection(peerId, isCaller);
+    _connect() {
+        if (!this._conn || this._conn.signalingState === "closed") this._openConnection();
 
-        if (isCaller) {
+        if (this._isCaller) {
             this._openChannel();
-        } else {
+        }
+        else {
             this._conn.ondatachannel = e => this._onChannelOpened(e);
         }
     }
 
-    _openConnection(peerId, isCaller) {
-        this._isCaller = isCaller;
-        this._peerId = peerId;
-        this._conn = new RTCPeerConnection(window.rtcConfig);
+    _openConnection() {
+        this._conn = new RTCPeerConnection(this.rtcConfig);
         this._conn.onicecandidate = e => this._onIceCandidate(e);
         this._conn.onicecandidateerror = e => this._onError(e);
         this._conn.onconnectionstatechange = _ => this._onConnectionStateChange();
@@ -534,18 +752,24 @@ class RTCPeer extends Peer {
 
     _openChannel() {
         if (!this._conn) return;
+
         const channel = this._conn.createDataChannel('data-channel', {
             ordered: true,
             reliable: true // Obsolete. See https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel/reliable
         });
         channel.onopen = e => this._onChannelOpened(e);
         channel.onerror = e => this._onError(e);
-        this._conn.createOffer().then(d => this._onDescription(d)).catch(e => this._onError(e));
+
+        this._conn
+            .createOffer()
+            .then(d => this._onDescription(d))
+            .catch(e => this._onError(e));
     }
 
     _onDescription(description) {
         // description.sdp = description.sdp.replace('b=AS:30', 'b=AS:1638400');
-        this._conn.setLocalDescription(description)
+        this._conn
+            .setLocalDescription(description)
             .then(_ => this._sendSignal({ sdp: description }))
             .catch(e => this._onError(e));
     }
@@ -556,19 +780,23 @@ class RTCPeer extends Peer {
     }
 
     onServerMessage(message) {
-        if (!this._conn) this._connect(message.sender.id, false);
+        if (!this._conn) this._connect();
 
         if (message.sdp) {
-            this._conn.setRemoteDescription(message.sdp)
-                .then( _ => {
+            this._conn
+                .setRemoteDescription(message.sdp)
+                .then(_ => {
                     if (message.sdp.type === 'offer') {
-                        return this._conn.createAnswer()
+                        return this._conn
+                            .createAnswer()
                             .then(d => this._onDescription(d));
                     }
                 })
                 .catch(e => this._onError(e));
-        } else if (message.ice) {
-            this._conn.addIceCandidate(new RTCIceCandidate(message.ice))
+        }
+        else if (message.ice) {
+            this._conn
+                .addIceCandidate(new RTCIceCandidate(message.ice))
                 .catch(e => this._onError(e));
         }
     }
@@ -621,7 +849,7 @@ class RTCPeer extends Peer {
     _onBeforeUnload(e) {
         if (this._busy) {
             e.preventDefault();
-            return "There are unfinished transfers. Are you sure you want to close?";
+            return Localization.getTranslation("notifications.unfinished-transfers-warning");
         }
     }
 
@@ -641,7 +869,7 @@ class RTCPeer extends Peer {
         console.log('RTC: channel closed', this._peerId);
         Events.fire('peer-disconnected', this._peerId);
         if (!this._isCaller) return;
-        this._connect(this._peerId, true); // reopen the channel
+        this._connect(); // reopen the channel
     }
 
     _onConnectionStateChange() {
@@ -680,15 +908,19 @@ class RTCPeer extends Peer {
     _sendSignal(signal) {
         signal.type = 'signal';
         signal.to = this._peerId;
-        signal.roomType = this._roomType;
-        signal.roomSecret = this._roomSecret;
+        signal.roomType = this._getRoomTypes()[0];
+        signal.roomId = this._roomIds[this._getRoomTypes()[0]];
         this._server.send(signal);
     }
 
     refresh() {
         // check if channel is open. otherwise create one
         if (this._isConnected() || this._isConnecting()) return;
-        this._connect(this._peerId, this._isCaller);
+
+        // only reconnect if peer is caller
+        if (!this._isCaller) return;
+
+        this._connect();
     }
 
     _isConnected() {
@@ -705,6 +937,48 @@ class RTCPeer extends Peer {
     }
 }
 
+class WSPeer extends Peer {
+
+    constructor(serverConnection, isCaller, peerId, roomType, roomId) {
+        super(serverConnection, isCaller, peerId, roomType, roomId);
+
+        this.rtcSupported = false;
+
+        if (!this._isCaller) return; // we will listen for a caller
+        this._sendSignal();
+    }
+
+    _send(chunk) {
+        this.sendJSON({
+            type: 'ws-chunk',
+            chunk: arrayBufferToBase64(chunk)
+        });
+    }
+
+    sendJSON(message) {
+        message.to = this._peerId;
+        message.roomType = this._getRoomTypes()[0];
+        message.roomId = this._roomIds[this._getRoomTypes()[0]];
+        this._server.send(message);
+    }
+
+    _sendSignal(connected = false) {
+        this.sendJSON({type: 'signal', connected: connected});
+    }
+
+    onServerMessage(message) {
+        this._peerId = message.sender.id;
+        Events.fire('peer-connected', {peerId: message.sender.id, connectionHash: this.getConnectionHash()})
+        if (message.connected) return;
+        this._sendSignal(true);
+    }
+
+    getConnectionHash() {
+        // Todo: implement SubtleCrypto asymmetric encryption and create connectionHash from public keys
+        return "";
+    }
+}
+
 class PeersManager {
 
     constructor(serverConnection) {
@@ -716,68 +990,147 @@ class PeersManager {
         Events.on('respond-to-files-transfer-request', e => this._onRespondToFileTransferRequest(e.detail))
         Events.on('send-text', e => this._onSendText(e.detail));
         Events.on('peer-left', e => this._onPeerLeft(e.detail));
+        Events.on('peer-joined', e => this._onPeerJoined(e.detail));
         Events.on('peer-connected', e => this._onPeerConnected(e.detail.peerId));
         Events.on('peer-disconnected', e => this._onPeerDisconnected(e.detail));
+
+        // this device closes connection
+        Events.on('room-secrets-deleted', e => this._onRoomSecretsDeleted(e.detail));
+        Events.on('leave-public-room', e => this._onLeavePublicRoom(e.detail));
+
+        // peer closes connection
         Events.on('secret-room-deleted', e => this._onSecretRoomDeleted(e.detail));
-        Events.on('display-name', e => this._onDisplayName(e.detail.message.displayName));
+
+        Events.on('room-secret-regenerated', e => this._onRoomSecretRegenerated(e.detail));
+        Events.on('display-name', e => this._onDisplayName(e.detail.displayName));
         Events.on('self-display-name-changed', e => this._notifyPeersDisplayNameChanged(e.detail));
-        Events.on('peer-display-name-changed', e => this._notifyPeerDisplayNameChanged(e.detail.peerId));
+        Events.on('notify-peer-display-name-changed', e => this._notifyPeerDisplayNameChanged(e.detail));
+        Events.on('auto-accept-updated', e => this._onAutoAcceptUpdated(e.detail.roomSecret, e.detail.autoAccept));
+        Events.on('ws-disconnected', _ => this._onWsDisconnected());
+        Events.on('ws-relay', e => this._onWsRelay(e.detail));
+        Events.on('ws-config', e => this._onWsConfig(e.detail));
+    }
+
+    _onWsConfig(wsConfig) {
+        this._wsConfig = wsConfig;
     }
 
     _onMessage(message) {
-        // if different roomType -> abort
-        if (this.peers[message.sender.id] && this.peers[message.sender.id]._roomType !== message.roomType) return;
-        if (!this.peers[message.sender.id]) {
-            this.peers[message.sender.id] = new RTCPeer(this._server, undefined, message.roomType, message.roomSecret);
-        }
-        this.peers[message.sender.id].onServerMessage(message);
+        const peerId = message.sender.id;
+        this.peers[peerId].onServerMessage(message);
     }
 
-    _onPeers(msg) {
-        msg.peers.forEach(peer => {
-            if (this.peers[peer.id]) {
-                // if different roomType -> abort
-                if (this.peers[peer.id].roomType !== msg.roomType || this.peers[peer.id].roomSecret !== msg.roomSecret) return;
-                this.peers[peer.id].refresh();
-                return;
-            }
-            this.peers[peer.id] = new RTCPeer(this._server, peer.id, msg.roomType, msg.roomSecret);
+    _refreshPeer(peerId, roomType, roomId) {
+        if (!this._peerExists(peerId)) return false;
+
+        const peer = this.peers[peerId];
+        const roomTypesDiffer = Object.keys(peer._roomIds)[0] !== roomType;
+        const roomIdsDiffer = peer._roomIds[roomType] !== roomId;
+
+        // if roomType or roomId for roomType differs peer is already connected
+        // -> only update roomSecret and reevaluate auto accept
+        if (roomTypesDiffer || roomIdsDiffer) {
+            peer._updateRoomIds(roomType, roomId);
+            peer._evaluateAutoAccept();
+
+            return true;
+        }
+
+        peer.refresh();
+
+        return true;
+    }
+
+    _createOrRefreshPeer(isCaller, peerId, roomType, roomId, rtcSupported) {
+        if (this._peerExists(peerId)) {
+            this._refreshPeer(peerId, roomType, roomId);
+            return;
+        }
+
+        if (window.isRtcSupported && rtcSupported) {
+            this.peers[peerId] = new RTCPeer(this._server, isCaller, peerId, roomType, roomId, this._wsConfig.rtcConfig);
+        }
+        else if (this._wsConfig.wsFallback) {
+            this.peers[peerId] = new WSPeer(this._server, isCaller, peerId, roomType, roomId);
+        }
+        else {
+            console.warn("Websocket fallback is not activated on this instance.\n" +
+                "Activate WebRTC in this browser or ask the admin of this instance to activate the websocket fallback.")
+        }
+    }
+
+    _onPeerJoined(message) {
+        this._createOrRefreshPeer(false, message.peer.id, message.roomType, message.roomId, message.peer.rtcSupported);
+    }
+
+    _onPeers(message) {
+        message.peers.forEach(peer => {
+            this._createOrRefreshPeer(true, peer.id, message.roomType, message.roomId, peer.rtcSupported);
         })
+    }
+
+    _onWsRelay(message) {
+        if (!this._wsConfig.wsFallback) return;
+
+        const messageJSON = JSON.parse(message);
+        if (messageJSON.type === 'ws-chunk') message = base64ToArrayBuffer(messageJSON.chunk);
+        this.peers[messageJSON.sender.id]._onMessage(message);
     }
 
     _onRespondToFileTransferRequest(detail) {
         this.peers[detail.to]._respondToFileTransferRequest(detail.accepted);
     }
 
-    _onFilesSelected(message) {
-        let inputFiles = Array.from(message.files);
-        delete message.files;
-        let files = [];
-        const l = inputFiles.length;
-        for (let i=0; i<l; i++) {
-            // when filetype is empty guess via suffix
-            const inputFile = inputFiles.shift();
-            const file = inputFile.type
-                ? inputFile
-                : new File([inputFile], inputFile.name, {type: mime.getMimeByFilename(inputFile.name)});
-            files.push(file)
-        }
-        this.peers[message.to].requestFileTransfer(files);
+    async _onFilesSelected(message) {
+        let files = await mime.addMissingMimeTypesToFiles(message.files);
+        await this.peers[message.to].requestFileTransfer(files);
     }
 
     _onSendText(message) {
         this.peers[message.to].sendText(message.text);
     }
 
-    _onPeerLeft(msg) {
-        if (msg.disconnect === true) {
-            // if user actively disconnected from PairDrop disconnect all peer to peer connections immediately
-            Events.fire('peer-disconnected', msg.peerId);
+    _onPeerLeft(message) {
+        if (this._peerExists(message.peerId) && this._webRtcSupported(message.peerId)) {
+            console.log('WSPeer left:', message.peerId);
+        }
+        if (message.disconnect === true) {
+            // if user actively disconnected from PairDrop server, disconnect all peer to peer connections immediately
+            this._disconnectOrRemoveRoomTypeByPeerId(message.peerId, message.roomType);
+
+            // If no peers are connected anymore, we can safely assume that no other tab on the same browser is connected:
+            // Tidy up peerIds in localStorage
+            if (Object.keys(this.peers).length === 0) {
+                BrowserTabsConnector
+                    .removeOtherPeerIdsFromLocalStorage()
+                    .then(peerIds => {
+                        if (!peerIds) return;
+                        console.log("successfully removed other peerIds from localStorage");
+                    });
+            }
         }
     }
 
     _onPeerConnected(peerId) {
         this._notifyPeerDisplayNameChanged(peerId);
+    }
+
+    _peerExists(peerId) {
+        return !!this.peers[peerId];
+    }
+
+    _webRtcSupported(peerId) {
+        return this.peers[peerId].rtcSupported
+    }
+
+    _onWsDisconnected() {
+        if (!this._wsConfig || !this._wsConfig.wsFallback) return;
+
+        for (const peerId in this.peers) {
+            if (!this._webRtcSupported(peerId)) {
+                Events.fire('peer-disconnected', peerId);
+            }
+        }
     }
 
     _onPeerDisconnected(peerId) {
@@ -787,15 +1140,53 @@ class PeersManager {
         if (peer._channel) peer._channel.onclose = null;
         peer._conn.close();
         peer._busy = false;
+        peer._roomIds = {};
+    }
+
+    _onRoomSecretsDeleted(roomSecrets) {
+        for (let i=0; i<roomSecrets.length; i++) {
+            this._disconnectOrRemoveRoomTypeByRoomId('secret', roomSecrets[i]);
+        }
+    }
+
+    _onLeavePublicRoom(publicRoomId) {
+        this._disconnectOrRemoveRoomTypeByRoomId('public-id', publicRoomId);
     }
 
     _onSecretRoomDeleted(roomSecret) {
-        for (const peerId in this.peers) {
-            const peer = this.peers[peerId];
-            if (peer._roomSecret === roomSecret) {
-                this._onPeerDisconnected(peerId);
-            }
+        this._disconnectOrRemoveRoomTypeByRoomId('secret', roomSecret);
+    }
+
+    _disconnectOrRemoveRoomTypeByRoomId(roomType, roomId) {
+        const peerIds = this._getPeerIdsFromRoomId(roomId);
+
+        if (!peerIds.length) return;
+
+        for (let i=0; i<peerIds.length; i++) {
+            this._disconnectOrRemoveRoomTypeByPeerId(peerIds[i], roomType);
         }
+    }
+
+    _disconnectOrRemoveRoomTypeByPeerId(peerId, roomType) {
+        const peer = this.peers[peerId];
+
+        if (!peer) return;
+
+        if (peer._getRoomTypes().length > 1) {
+            peer._removeRoomType(roomType);
+        }
+        else {
+            Events.fire('peer-disconnected', peerId);
+        }
+    }
+
+    _onRoomSecretRegenerated(message) {
+        PersistentStorage
+            .updateRoomSecret(message.oldRoomSecret, message.newRoomSecret)
+            .then(_ => {
+                console.log("successfully regenerated room secret");
+                Events.fire("room-secrets", [message.newRoomSecret]);
+            })
     }
 
     _notifyPeersDisplayNameChanged(newDisplayName) {
@@ -813,6 +1204,31 @@ class PeersManager {
 
     _onDisplayName(displayName) {
         this._originalDisplayName = displayName;
+        // if the displayName has not been changed (yet) set the displayName to the original displayName
+        if (!this._displayName) this._displayName = displayName;
+    }
+
+    _onAutoAcceptUpdated(roomSecret, autoAccept) {
+        const peerId = this._getPeerIdsFromRoomId(roomSecret)[0];
+
+        if (!peerId) return;
+
+        this.peers[peerId]._setAutoAccept(autoAccept);
+    }
+
+    _getPeerIdsFromRoomId(roomId) {
+        if (!roomId) return [];
+
+        let peerIds = []
+        for (const peerId in this.peers) {
+            const peer = this.peers[peerId];
+
+            // peer must have same roomId.
+            if (Object.values(peer._roomIds).includes(roomId)) {
+                peerIds.push(peer._peerId);
+            }
+        }
+        return peerIds;
     }
 }
 
@@ -895,18 +1311,4 @@ class FileDigester {
         }));
     }
 
-}
-
-class Events {
-    static fire(type, detail) {
-        window.dispatchEvent(new CustomEvent(type, { detail: detail }));
-    }
-
-    static on(type, callback, options = false) {
-        return window.addEventListener(type, callback, options);
-    }
-
-    static off(type, callback, options = false) {
-        return window.removeEventListener(type, callback, options);
-    }
 }
